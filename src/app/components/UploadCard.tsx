@@ -19,7 +19,6 @@ import {
   Key,
   ShieldCheck,
   Lock,
-  ArrowRight,
 } from "lucide-react";
 
 export type ProfileStyle = "corporate" | "studio" | "outdoor";
@@ -27,6 +26,45 @@ export type ProfileStyle = "corporate" | "studio" | "outdoor";
 interface UploadCardProps {
   onGenerateSuccess?: (imageUrl: string) => void;
 }
+
+// 브라우저 캔버스(Canvas) 기반 고화질 이미지 자동 리사이징 & 압축 헬퍼 (Vercel 4.5MB 413 Payload Limit 방지)
+const compressImage = (
+  base64Str: string,
+  maxWidth = 1280,
+  maxHeight = 1280,
+  quality = 0.85
+): Promise<string> => {
+  return new Promise((resolve) => {
+    const img = new window.Image();
+    img.src = base64Str;
+    img.onload = () => {
+      let width = img.width;
+      let height = img.height;
+
+      if (width > maxWidth || height > maxHeight) {
+        if (width > height) {
+          height = Math.round((height * maxWidth) / width);
+          width = maxWidth;
+        } else {
+          width = Math.round((width * maxHeight) / height);
+          height = maxHeight;
+        }
+      }
+
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      } else {
+        resolve(base64Str);
+      }
+    };
+    img.onerror = () => resolve(base64Str);
+  });
+};
 
 export default function UploadCard({ onGenerateSuccess }: UploadCardProps) {
   const [imageBase64, setImageBase64] = useState<string | null>(null);
@@ -89,17 +127,19 @@ export default function UploadCard({ onGenerateSuccess }: UploadCardProps) {
       return;
     }
 
-    // 파일 용량 8MB 제한 검증
-    const maxSizeBytes = 8 * 1024 * 1024;
+    // 파일 용량 12MB 제한 검증
+    const maxSizeBytes = 12 * 1024 * 1024;
     if (file.size > maxSizeBytes) {
-      setError("파일 크기는 8MB 이하이어야 합니다.");
+      setError("파일 크기는 12MB 이하이어야 합니다.");
       return;
     }
 
     const reader = new FileReader();
-    reader.onload = (e) => {
-      const result = e.target?.result as string;
-      setImageBase64(result);
+    reader.onload = async (e) => {
+      const rawBase64 = e.target?.result as string;
+      // 자동 압축 & 최적화 적용
+      const compressed = await compressImage(rawBase64);
+      setImageBase64(compressed);
       setFileName(file.name);
     };
     reader.onerror = () => {
@@ -175,6 +215,9 @@ export default function UploadCard({ onGenerateSuccess }: UploadCardProps) {
     setError(null);
 
     try {
+      // 전송 전 한 번 더 캔버스 최적화 수행
+      const optimizedPayload = await compressImage(imageBase64);
+
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
       };
@@ -187,12 +230,23 @@ export default function UploadCard({ onGenerateSuccess }: UploadCardProps) {
         method: "POST",
         headers,
         body: JSON.stringify({
-          imageBase64,
+          imageBase64: optimizedPayload,
           style: selectedStyle,
         }),
       });
 
-      const data = await response.json();
+      // HTML 413 Payload Error나 JSON 아닐 경우에 대비한 에러 처리 예외 안전장치
+      let data: any = {};
+      const responseText = await response.text();
+
+      try {
+        data = JSON.parse(responseText);
+      } catch (jsonErr) {
+        if (response.status === 413 || responseText.includes("Request Entity")) {
+          throw new Error("이미지 파일 크기가 서버 용량 제한(4.5MB)을 초과했습니다. 다른 사진으로 시도해 주세요.");
+        }
+        throw new Error("서버 응답을 처리하는 중 오류가 발생했습니다.");
+      }
 
       if (!response.ok) {
         throw new Error(data?.error || "AI 헤드샷 생성에 실패했습니다.");
@@ -239,7 +293,6 @@ export default function UploadCard({ onGenerateSuccess }: UploadCardProps) {
       URL.revokeObjectURL(blobUrl);
     } catch (err) {
       console.error("PNG download failed:", err);
-      // Fallback: 새 탭에서 열기
       window.open(resultImageUrl, "_blank");
     } finally {
       setIsDownloading(false);
@@ -291,7 +344,7 @@ export default function UploadCard({ onGenerateSuccess }: UploadCardProps) {
         <p className="text-xs sm:text-sm text-slate-500">
           {resultImageUrl
             ? "선택한 원본 셀카와 완성된 AI 헤드샷의 차이를 비교해 보세요."
-            : "얼굴이 잘 나온 정면 셀카 1장을 선택해 주세요 (최대 8MB)"}
+            : "얼굴이 잘 나온 정면 셀카 1장을 선택해 주세요 (최대 12MB)"}
         </p>
       </div>
 
@@ -444,7 +497,7 @@ export default function UploadCard({ onGenerateSuccess }: UploadCardProps) {
               <p className="text-sm font-semibold text-slate-800 mb-1">
                 클릭하여 셀카 사진 선택 또는 드래그앤드롭
               </p>
-              <p className="text-xs text-slate-400">JPG, PNG, WEBP 지원 (8MB 이내)</p>
+              <p className="text-xs text-slate-400">JPG, PNG, WEBP 지원 (자동 최적화)</p>
             </div>
           ) : (
             <div className="relative rounded-2xl bg-slate-50 border border-slate-200 p-4 flex flex-col sm:flex-row items-center gap-4">
@@ -459,7 +512,7 @@ export default function UploadCard({ onGenerateSuccess }: UploadCardProps) {
 
               <div className="flex-1 text-center sm:text-left min-w-0">
                 <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-xs font-medium mb-2">
-                  <Check className="w-3.5 h-3.5" /> 셀카 선택 완료
+                  <Check className="w-3.5 h-3.5" /> 셀카 선택 완료 (자동 최적화 적용)
                 </div>
                 <p className="text-sm font-semibold text-slate-800 truncate mb-1" title={fileName}>
                   {fileName || "선택된 이미지"}
